@@ -13,7 +13,6 @@
 - name: Map hostname to actual static IP
   ansible.builtin.lineinfile:
     dest: /etc/hosts
-    # Use ansible_default_ipv4.address or a hardcoded var
     line: "{{ ansible_default_ipv4.address }} {{ inventory_hostname }} {{ inventory_hostname_short }}"
     regexp: "^{{ ansible_default_ipv4.address | replace('.', '\\.') }}"
     state: present
@@ -21,14 +20,198 @@
 - name: Refresh facts so ansible_fqdn updates
   ansible.builtin.setup:
 
-- name: Disable WiFi/Bluetooth
-  ansible.builtin.copy:
-    src: raspi-blacklist.conf
-    dest: /etc/modprobe.d/raspi-blacklist.conf
-    mode: "0600"
+- name: "Raspberry Pi radios | determine if changes requested"
+  ansible.builtin.set_fact:
+    rpi_radios_requested: "{{ (rpi_disable_wifi | bool) or (rpi_disable_bluetooth | bool) }}"
+  changed_when: false
+  tags: configure-system
+
+- name: "Raspberry Pi radios | check model (device tree)"
+  ansible.builtin.stat:
+    path: /sys/firmware/devicetree/base/model
+  register: rpi_dt_model_stat
+  when: rpi_radios_requested | bool
+  tags: configure-system
+
+- name: "Raspberry Pi radios | read model (device tree)"
+  ansible.builtin.slurp:
+    path: /sys/firmware/devicetree/base/model
+  register: rpi_dt_model
   when:
-    - "'raspi' in ansible_kernel"
-    - blacklist_wireless_pi
+    - rpi_radios_requested | bool
+    - rpi_dt_model_stat.stat.exists
+  tags: configure-system
+
+- name: "Raspberry Pi radios | check model (legacy device tree)"
+  ansible.builtin.stat:
+    path: /proc/device-tree/model
+  register: rpi_dt_legacy_stat
+  when:
+    - rpi_radios_requested | bool
+    - not rpi_dt_model_stat.stat.exists
+  tags: configure-system
+
+- name: "Raspberry Pi radios | read model (legacy device tree)"
+  ansible.builtin.slurp:
+    path: /proc/device-tree/model
+  register: rpi_dt_legacy_model
+  when:
+    - rpi_radios_requested | bool
+    - rpi_dt_legacy_stat.stat.exists
+  tags: configure-system
+
+- name: "Raspberry Pi radios | read cpuinfo (fallback)"
+  ansible.builtin.slurp:
+    path: /proc/cpuinfo
+  register: rpi_cpuinfo
+  when: rpi_radios_requested | bool
+  tags: configure-system
+
+- name: "Raspberry Pi radios | set model facts"
+  ansible.builtin.set_fact:
+    rpi_model: >-
+      {{
+        (rpi_dt_model.content | b64decode | trim)
+        if (rpi_dt_model is defined and rpi_dt_model.content is defined)
+        else ((rpi_dt_legacy_model.content | b64decode | trim)
+          if (rpi_dt_legacy_model is defined and rpi_dt_legacy_model.content is defined)
+          else ((rpi_cpuinfo.content | b64decode).splitlines()
+            | select('match', '^Model\\s*:')
+            | list
+            | first
+            | default('')
+            | regex_replace('^Model\\s*:\\s*', '')
+          )
+        )
+      }}
+    rpi_is_pi: "{{ 'Raspberry Pi' in (rpi_model | default('')) }}"
+  changed_when: false
+  when: rpi_radios_requested | bool
+  tags: configure-system
+
+- name: "Raspberry Pi radios | determine generation"
+  ansible.builtin.set_fact:
+    rpi_generation: >-
+      {{
+        '5' if ('Raspberry Pi 5' in (rpi_model | default('')))
+        else '4' if ('Raspberry Pi 4' in (rpi_model | default('')))
+        else ''
+      }}
+  changed_when: false
+  when:
+    - rpi_radios_requested | bool
+    - rpi_is_pi | bool
+  tags: configure-system
+
+# Fail fast to avoid applying incorrect overlays on unknown Pi models.
+- name: "Raspberry Pi radios | fail on unknown generation"
+  ansible.builtin.fail:
+    msg: "Unable to determine Raspberry Pi generation from model '{{ rpi_model }}'."
+  when:
+    - rpi_radios_requested | bool
+    - rpi_is_pi | bool
+    - rpi_generation == ""
+  tags: configure-system
+
+- name: "Raspberry Pi radios | select overlays"
+  ansible.builtin.set_fact:
+    rpi_wifi_overlay: "{{ 'dtoverlay=disable-wifi' if rpi_generation == '4' else 'dtoverlay=disable-wifi-pi5' }}"
+    rpi_bt_overlay: "{{ 'dtoverlay=disable-bt' if rpi_generation == '4' else 'dtoverlay=disable-bt-pi5' }}"
+    rpi_overlay_lines: >-
+      {{
+        ([] +
+          ([rpi_wifi_overlay] if rpi_disable_wifi | bool else []) +
+          ([rpi_bt_overlay] if rpi_disable_bluetooth | bool else [])
+        )
+      }}
+  changed_when: false
+  when:
+    - rpi_radios_requested | bool
+    - rpi_is_pi | bool
+    - rpi_generation != ""
+  tags: configure-system
+
+- name: "Raspberry Pi radios | check firmware config"
+  ansible.builtin.stat:
+    path: "{{ rpi_config_txt_path }}"
+  register: rpi_config_stat
+  when:
+    - rpi_radios_requested | bool
+    - rpi_is_pi | bool
+  tags: configure-system
+
+- name: "Raspberry Pi radios | fail if config missing"
+  ansible.builtin.fail:
+    msg: "Raspberry Pi firmware config not found at {{ rpi_config_txt_path }}."
+  when:
+    - rpi_radios_requested | bool
+    - rpi_is_pi | bool
+    - not rpi_config_stat.stat.exists
+  tags: configure-system
+
+- name: "Raspberry Pi radios | backup firmware config"
+  ansible.builtin.copy:
+    src: "{{ rpi_config_txt_path }}"
+    dest: "{{ rpi_config_txt_path }}.bak"
+    remote_src: true
+    force: false
+    mode: "0644"
+  when:
+    - rpi_radios_requested | bool
+    - rpi_is_pi | bool
+    - rpi_config_stat.stat.exists
+  tags: configure-system
+
+- name: "Raspberry Pi radios | ensure overlays present"
+  ansible.builtin.lineinfile:
+    path: "{{ rpi_config_txt_path }}"
+    line: "{{ item }}"
+    regexp: "^#?{{ item | regex_escape() }}\\s*$"
+    state: present
+    insertafter: EOF
+    create: false
+    backup: true
+  loop: "{{ rpi_overlay_lines }}"
+  when:
+    - rpi_radios_requested | bool
+    - rpi_is_pi | bool
+    - rpi_config_stat.stat.exists
+    - rpi_overlay_lines | length > 0
+  tags: configure-system
+
+- name: "Raspberry Pi radios | optionally disable bluetooth.service"
+  ansible.builtin.systemd:
+    name: bluetooth.service
+    enabled: false
+    state: stopped
+    masked: true
+  when:
+    - rpi_radios_requested | bool
+    - rpi_is_pi | bool
+    - rpi_disable_bluetooth | bool
+    - rpi_disable_bt_service | bool
+  tags: configure-system
+
+- name: "Raspberry Pi radios | remove legacy blacklist"
+  ansible.builtin.file:
+    path: /etc/modprobe.d/raspi-blacklist.conf
+    state: absent
+  when:
+    - rpi_radios_requested | bool
+    - rpi_is_pi | bool
+  tags: configure-system
+
+- name: "Raspberry Pi radios | debug detection"
+  ansible.builtin.debug:
+    msg:
+      model: "{{ rpi_model | default('') }}"
+      generation: "{{ rpi_generation | default('') }}"
+      overlays: "{{ rpi_overlay_lines | default([]) }}"
+      config_path: "{{ rpi_config_txt_path }}"
+  when:
+    - rpi_radios_requested | bool
+    - rpi_is_pi | bool
+    - rpi_debug | bool or (ansible_verbosity | int) >= 2
   tags: configure-system
 
 - name: Setup passwordless sudo for sudo group
@@ -147,7 +330,6 @@
     state: started
   tags: harden-system
 
-# tasks/harden_system.yml (existing content)
 - name: "SSH | host key check"
   ansible.builtin.stat:
     path: /etc/ssh/ssh_host_ed25519_key
@@ -161,7 +343,6 @@
   notify: Restart sshd
   tags: harden-system
 
-# Drop hardened sshd config snippet.
 - name: "HARDEN | configure sshd"
   ansible.builtin.template:
     src: sshd_hardening.conf.j2
@@ -172,7 +353,6 @@
   notify: Restart sshd
   tags: harden-system
 
-# Apply sysctl hardening (reload via handler only when template changes).
 - name: "SYSCTL | render hardened drop-in"
   ansible.builtin.template:
     src: sysctl-99-hardening.conf.j2
@@ -183,7 +363,6 @@
   notify: "Reload kernel params"
   tags: harden-system
 
-# Configure Fail2Ban jails.
 - name: "FAIL2BAN | configure jails"
   ansible.builtin.template:
     src: jail.local.j2
@@ -226,7 +405,7 @@
       when: ufw_manage_forward_policy | bool
       notify: Reload UFW
 
-    # SSH hardcoded first to prevent lockouts
+    # Allow SSH before applying default deny to avoid lockouts.
     - name: Allow SSH rule(s)
       community.general.ufw:
         rule: "allow"
@@ -266,5 +445,5 @@
   ansible.builtin.set_fact:
     reboot_needed: true
   when: reboot_required.stat.exists
-  changed_when: true  # This forces the task to report "changed"
+  changed_when: true
   notify: Reboot system

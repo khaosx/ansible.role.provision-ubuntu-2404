@@ -1,4 +1,0 @@
-all:
-  hosts:
-    ubuntu-2404-host:
-      ansible_host: 192.0.2.10

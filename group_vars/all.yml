@@ -1,8 +1,0 @@
----
-
-ansible_managed: |
-  Managed By Ansible - Do Not Modify
-
-# Role-required vars (override per environment as needed)
-site_timezone: "America/New_York"
-blacklist_wireless_pi: true

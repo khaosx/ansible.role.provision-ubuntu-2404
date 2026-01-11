@@ -1,9 +1,9 @@
 ---
 # defaults/main.yml — ubuntu_2404_server
-# Explicit, safe defaults for all variables referenced by this role’s tasks/templates.
 
 # General
 reboot_timeout: 600
+site_timezone: "UTC"
 apps_to_install:
   - ufw
   - fail2ban
@@ -69,3 +69,11 @@ chrony_allow_network: []
 
 chrony_makestep_threshold: 1.0
 chrony_makestep_limit: 3
+
+# Raspberry Pi radio control (Device Tree overlays)
+rpi_disable_radios: true
+rpi_disable_wifi: "{{ rpi_disable_radios | bool }}"
+rpi_disable_bluetooth: "{{ rpi_disable_radios | bool }}"
+rpi_disable_bt_service: false
+rpi_config_txt_path: "/boot/firmware/config.txt"
+rpi_debug: false

@@ -1,5 +1,6 @@
 ---
 
+# Best-effort GPU detection; keep checks non-fatal for headless hosts.
 - name: "GPU check"
   ansible.builtin.command:
     cmd: "lshw -short -class display"

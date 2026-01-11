@@ -1,0 +1,24 @@
+---
+galaxy_info:
+  role_name: ubuntu_2404_server
+  author: Kristopher A. Newman (khaosx)
+  description: Baseline provisioning for Ubuntu 24.04 servers (packages, hardening, UFW, chrony, optional GPU drivers).
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+  galaxy_tags:
+    - ubuntu
+    - provisioning
+    - hardening
+    - raspberrypi
+    - ufw
+    - chrony
+    - fail2ban
+    - security
+    - server
+
+collections:
+  - community.general
+
+dependencies: []
