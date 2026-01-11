@@ -1,0 +1,10 @@
+# {{ ansible_managed | comment }}
+#
+
+# Generated from sysctl_params dict.
+
+{% for kv in (sysctl_params | dict2items | sort(attribute='key')) -%}
+{{ kv.key }} = {{ kv.value }}
+{% endfor %}
+
+# {{ ansible_managed | comment }}

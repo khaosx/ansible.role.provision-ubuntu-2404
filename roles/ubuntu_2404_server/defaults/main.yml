@@ -1,0 +1,71 @@
+---
+# defaults/main.yml — ubuntu_2404_server
+# Explicit, safe defaults for all variables referenced by this role’s tasks/templates.
+
+# General
+reboot_timeout: 600
+apps_to_install:
+  - ufw
+  - fail2ban
+  - unattended-upgrades
+  - curl
+  - wget
+  - git
+  - chrony
+  - lshw
+  - pciutils
+
+# Unattended upgrades (50unattended-upgrades.j2)
+unattended_mail: ""                # e.g., "root"
+unattended_mail_only_on_error: true
+unattended_minimal_steps: true
+unattended_reboot: true
+unattended_reboot_time: "04:00"
+
+# Periodic APT (20auto-upgrades.j2)
+apt_periodic_update: "1"           # APT::Periodic::Update-Package-Lists
+apt_periodic_download: "1"         # APT::Periodic::Download-Upgradeable-Packages
+apt_periodic_upgrade: "1"          # APT::Periodic::Unattended-Upgrade
+apt_periodic_autoclean: "7"        # APT::Periodic::AutocleanInterval
+apt_periodic_random_sleep: "1800"  # APT::Periodic::RandomSleep
+
+# SSH hardening (sshd_hardening.conf.j2)
+ssh_allow_users: []                # e.g., ["kris"]
+
+# Sysctl (sysctl-99-hardening.conf.j2)
+# Provide a dict of key: value pairs; rendered verbatim.
+sysctl_params: {}
+
+# Fail2Ban (jail.local.j2)
+fail2ban_jail:
+  sshd:
+    enabled: true
+    port: ssh
+    filter: sshd
+    logpath: /var/log/auth.log
+    maxretry: 5
+
+# UFW baseline (configure_firewall.yml)
+ufw_enable: true
+ufw_reset: false
+ufw_ipv6: false
+ufw_logging: "on"                  # off|on|low|medium|high|full
+
+# Default policies and optional forward policy management
+ufw_default_incoming: deny
+ufw_default_outgoing: allow
+ufw_manage_forward_policy: false
+ufw_default_forward_policy: "DROP" # ACCEPT|DROP
+
+chrony_ntp_servers:
+  - time.apple.com
+  - time.cloudflare.com
+  - 0.pool.ntp.org
+
+chrony_allow_network: []
+# Example:
+# chrony_allow_network:
+#   - "192.168.10.0/24"
+
+chrony_makestep_threshold: 1.0
+chrony_makestep_limit: 3

@@ -1,0 +1,12 @@
+# {{ ansible_managed | comment }}
+#
+
+[sshd]
+enabled = {{ fail2ban_jail.sshd.enabled | lower }}
+backend = systemd
+port    = {{ fail2ban_jail.sshd.port }}
+filter  = {{ fail2ban_jail.sshd.filter }}
+logpath = {{ fail2ban_jail.sshd.logpath }}
+maxretry = {{ fail2ban_jail.sshd.maxretry }}
+
+# {{ ansible_managed | comment }}

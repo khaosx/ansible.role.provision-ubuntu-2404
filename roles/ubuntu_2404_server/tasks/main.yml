@@ -1,0 +1,270 @@
+---
+
+- name: Set hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname if '.' in inventory_hostname else inventory_hostname_short }}"
+
+- name: Ensure localhost is clean
+  ansible.builtin.lineinfile:
+    dest: /etc/hosts
+    regexp: '^127\.0\.0\.1'
+    line: "127.0.0.1 localhost"
+
+- name: Map hostname to actual static IP
+  ansible.builtin.lineinfile:
+    dest: /etc/hosts
+    # Use ansible_default_ipv4.address or a hardcoded var
+    line: "{{ ansible_default_ipv4.address }} {{ inventory_hostname }} {{ inventory_hostname_short }}"
+    regexp: "^{{ ansible_default_ipv4.address | replace('.', '\\.') }}"
+    state: present
+
+- name: Refresh facts so ansible_fqdn updates
+  ansible.builtin.setup:
+
+- name: Disable WiFi/Bluetooth
+  ansible.builtin.copy:
+    src: raspi-blacklist.conf
+    dest: /etc/modprobe.d/raspi-blacklist.conf
+    mode: "0600"
+  when:
+    - "'raspi' in ansible_kernel"
+    - blacklist_wireless_pi
+  tags: configure-system
+
+- name: Setup passwordless sudo for sudo group
+  ansible.builtin.lineinfile:
+    path: /etc/sudoers
+    state: present
+    regexp: '^%sudo'
+    line: '%sudo ALL=(ALL) NOPASSWD: ALL'
+    validate: 'visudo -cf %s'
+  tags: configure-system
+
+- name: Disable Root Login
+  ansible.builtin.lineinfile:
+    dest: /etc/ssh/sshd_config
+    regexp: '^PermitRootLogin'
+    line: "PermitRootLogin no"
+    state: present
+    backup: true
+  notify: Restart sshd
+  tags: configure-system
+
+- name: Disable MOTD components
+  ansible.builtin.file:
+    path: /etc/update-motd.d/{{ item }}
+    mode: u-x,g-x,o-x
+  loop: ['10-help-text', '50-motd-news']
+  tags: configure-system
+
+- name: Update and upgrade apt packages
+  ansible.builtin.apt:
+    upgrade: true
+    update_cache: true
+    cache_valid_time: 86400
+  tags: update-system
+
+- name: Install additional applications
+  ansible.builtin.apt:
+    name: "{{ apps_to_install }}"
+    state: present
+    force_apt_get: true
+  tags: update-system
+
+- name: "GPU drivers"
+  ansible.builtin.import_tasks: gpu_drivers.yml
+  tags: [update-system, nvidia, drivers]
+
+- name: Install and enable QEMU guest tools on VM
+  when: ansible_system_vendor == "QEMU"
+  notify: Reboot Ubuntu server
+  tags: update-system
+  block:
+    - name: Install QEMU guest tools
+      ansible.builtin.apt:
+        name: qemu-guest-agent
+        state: present
+
+    - name: Enable and start QEMU guest agent service
+      ansible.builtin.systemd:
+        name: qemu-guest-agent
+        enabled: true
+        state: started
+
+- name: Set timezone
+  community.general.timezone:
+    name: "{{ site_timezone }}"
+  notify: Restart chrony
+  tags: configure-ntp
+
+- name: Configure chrony
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart chrony
+  tags: configure-ntp
+
+- name: Disable systemd-timesyncd (avoid double NTP daemons)
+  ansible.builtin.systemd:
+    name: systemd-timesyncd
+    enabled: false
+    state: stopped
+  failed_when: false
+  tags: configure-ntp
+
+- name: Ensure chrony is enabled and running
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started
+  tags: configure-ntp
+
+- name: Deploy periodic-upgrades config
+  ansible.builtin.template:
+    src: 20auto-upgrades.j2
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: '0644'
+  tags: harden-system
+
+- name: Deploy unattended-upgrades config
+  ansible.builtin.template:
+    src: 50unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/50unattended-upgrades
+    owner: root
+    group: root
+    mode: '0644'
+  tags: harden-system
+
+- name: "FAIL2BAN | ensure service enabled and running"
+  ansible.builtin.service:
+    name: fail2ban
+    enabled: true
+    state: started
+  tags: harden-system
+
+# tasks/harden_system.yml (existing content)
+- name: "SSH | host key check"
+  ansible.builtin.stat:
+    path: /etc/ssh/ssh_host_ed25519_key
+  register: ssh_hostkey_ed25519
+  tags: harden-system
+
+- name: "SSH | generate default host keys (if missing)"
+  ansible.builtin.command: ssh-keygen -A
+  when: not ssh_hostkey_ed25519.stat.exists
+  changed_when: true
+  notify: Restart sshd
+  tags: harden-system
+
+# Drop hardened sshd config snippet.
+- name: "HARDEN | configure sshd"
+  ansible.builtin.template:
+    src: sshd_hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/99-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart sshd
+  tags: harden-system
+
+# Apply sysctl hardening (reload via handler only when template changes).
+- name: "SYSCTL | render hardened drop-in"
+  ansible.builtin.template:
+    src: sysctl-99-hardening.conf.j2
+    dest: /etc/sysctl.d/99-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: "Reload kernel params"
+  tags: harden-system
+
+# Configure Fail2Ban jails.
+- name: "FAIL2BAN | configure jails"
+  ansible.builtin.template:
+    src: jail.local.j2
+    dest: /etc/fail2ban/jail.local
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fail2ban
+  tags: harden-system
+
+- name: Configure firewall
+  when:
+    - ansible_distribution == "Ubuntu"
+    - ansible_virtualization_type != 'lxc'
+  tags: configure-firewall
+  block:
+    - name: Optionally reset UFW (flush rules)
+      community.general.ufw:
+        state: reset
+      when: ufw_reset | bool
+      notify: Reload UFW
+
+    - name: Configure IPv6 support in /etc/default/ufw
+      ansible.builtin.lineinfile:
+        path: /etc/default/ufw
+        regexp: '^IPV6='
+        line: "IPV6={{ (ufw_ipv6 | bool) | ternary('yes', 'no') }}"
+        create: true
+        mode: "0644"
+      notify: Reload UFW
+
+    - name: Optionally manage DEFAULT_FORWARD_POLICY
+      ansible.builtin.lineinfile:
+        path: /etc/default/ufw
+        regexp: '^DEFAULT_FORWARD_POLICY='
+        line: >-
+          DEFAULT_FORWARD_POLICY="{{ ufw_default_forward_policy | upper }}"
+        create: true
+        mode: "0644"
+      when: ufw_manage_forward_policy | bool
+      notify: Reload UFW
+
+    # SSH hardcoded first to prevent lockouts
+    - name: Allow SSH rule(s)
+      community.general.ufw:
+        rule: "allow"
+        port: "22"
+        proto: tcp
+        comment: "SSH"
+      when: ufw_enable | bool
+      notify: Reload UFW
+
+    - name: Set default incoming policy
+      community.general.ufw:
+        state: enabled
+        direction: incoming
+        policy: "{{ ufw_default_incoming }}"
+      when: ufw_enable | bool
+      notify: Reload UFW
+
+    - name: Set default outgoing policy
+      community.general.ufw:
+        state: enabled
+        direction: outgoing
+        policy: "{{ ufw_default_outgoing }}"
+      when: ufw_enable | bool
+      notify: Reload UFW
+
+    - name: Set UFW logging level
+      community.general.ufw:
+        logging: "{{ ufw_logging }}"
+      notify: Reload UFW
+
+- name: Reboot required check
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: reboot_required
+
+- name: Signal reboot if file exists
+  ansible.builtin.set_fact:
+    reboot_needed: true
+  when: reboot_required.stat.exists
+  changed_when: true  # This forces the task to report "changed"
+  notify: Reboot system

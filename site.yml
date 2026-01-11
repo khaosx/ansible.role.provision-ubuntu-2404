@@ -1,0 +1,12 @@
+---
+
+- name: Ubuntu 24.04 Common Provisioning Tasks
+  hosts: all
+  gather_facts: true
+  become: true
+  roles:
+    - role: ubuntu_2404_server
+      when:
+        - ansible_distribution == "Ubuntu"
+        - ansible_distribution_version == "24.04"
+      tags: [provision, system]

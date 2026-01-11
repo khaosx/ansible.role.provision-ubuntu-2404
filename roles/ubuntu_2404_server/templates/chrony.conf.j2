@@ -1,0 +1,19 @@
+# {{ ansible_managed | comment }}
+
+{% for server in chrony_ntp_servers %}
+server {{ server }} iburst
+{% endfor %}
+
+driftfile /var/lib/chrony/chrony.drift
+rtcsync
+makestep {{ chrony_makestep_threshold | default('1.0') }} {{ chrony_makestep_limit | default('3') }}
+
+logdir /var/log/chrony
+log measurements statistics tracking
+
+# Allow network clients (if defined)
+{% if chrony_allow_network is defined %}
+{% for net in chrony_allow_network %}
+allow {{ net }}
+{% endfor %}
+{% endif %}
